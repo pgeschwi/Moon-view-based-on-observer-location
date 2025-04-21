@@ -36,6 +36,14 @@ All PIN connections and their usage are listed in the remaks below.
 #define FONT1 &FreeMono9pt7b     // Simple Font included with TFT_eSPI library
 
 
+#define CS_PIN 35
+#define DC_PIN 2
+#define RESET_PIN 4
+#define LED_PIN 21
+#define MISO_PIN 19
+#define MOSI_PIN 23
+#define CLK_PIN 18
+
 /*
    Define SPI PINs (may need running Display and SD card on seaparate SPI busses)
    Display TFT_eSPI Pins defined in User_Setup.h
@@ -46,6 +54,9 @@ All PIN connections and their usage are listed in the remaks below.
    TFT_DC    2  // Data Command control pin
    TFT_RST   4  // Reset pin (could connect to RST pin)
 */
+
+TFT_eSPI tft = TFT_eSPI();
+
 #define DispText_CS 5   // manual CS switch outside Library, defined CS Pin in library as 35 to take manual control (User_Setup.h)
 #define DispMoon_CS 16  // display for moon phase and relative position of Sun,Moon,Earth
 
@@ -60,18 +71,17 @@ All PIN connections and their usage are listed in the remaks below.
 #define I2C_SCL 22
 
 // Encoder Pins
-#define RotA 33                           // Rotary Pin A (swap these pins if rotary sense is inverted, or use knob->invertDirection(); in setup)
-#define RotB 32                           // Rotary Pin B
+#define RotA 32                           // Rotary Pin A (swap these pins if rotary sense is inverted, or use knob->invertDirection(); in setup)
+#define RotB 33                           // Rotary Pin B
 #define BtnPin 25                         // Encoder Push Button
 RotaryEncoder rotaryEncoder(RotA, RotB);  // Library supports button press as well, but causes Core 0 panic on an ESP-C3 due to interrupt handler timeout
 bool SelBtnOld = false;                   // remember previous button status
 unsigned long BtnRelease = 0;             // button release timestamp
 
-TFT_eSPI tft = TFT_eSPI();
 unsigned long displayRefresh = 500;    // reduced refresh time in ms during settings screen to avoid extensive flicker
 unsigned long displayRefreshNext = 0;  // next scheduled refresh time stamp (millis)
 #define TFT_COLOR1 0xCD0C              // old (warm) incandescent color, adjust as desired
-uint16_t TFT_BOXES = TFT_COLOR1;       // settings boxes
+uint16_t TFT_BOXES = TFT_COLOR1;       // color for settings boxes
 PNG png;                               // PNG image handling
 
 // Image dimensions for PNG files being rotated (Moon illuminated disk)
@@ -97,8 +107,8 @@ RTC_DS1307 RTC;  // actual RTC type in use is DS3231
 
 double observer_lat = 45.0;   // Minneapolis initial preset if none stored in NVRAM
 double observer_lon = -93.0;  // West
-int8_t NVlat = 0;             // lat to/from NVRAM (full degrees)
-int8_t NVlon = 0;             // lon to/from NVRAM
+int8_t NVlat = 0;             // lat to/from NVRAM +/- 90 degrees (full degrees)
+int16_t NVlon = 0;            // lon to/from NVRAM +/- 180 degrees
 
 // Posix Timezone rules
 // got these definitions from https://support.cyberdata.net/portal/en/kb/articles/010d63c0cfce3676151e1f2d5442e311
@@ -196,7 +206,9 @@ void setup() {
   }
   TZselect = RTC.readnvram(2);                               // read RTC NVRAM TZ setting
   NVlat = RTC.readnvram(3);                                  // observer lat
-  NVlon = RTC.readnvram(4);                                  //observer lon
+  uint8_t msb = RTC.readnvram(4);                            // Longitude high byte
+  uint8_t lsb = RTC.readnvram(5);                            // Longitude low byte
+  NVlon = (msb << 8) | lsb;                                  // observer lon
   if (TZselect < 0 || TZselect >= TZrows) { TZselect = 1; }  // Plausibility check NVRAM data
   if (NVlat < -90 || NVlat > 90) { NVlat = 0; }
   if (NVlon < -180 || NVlon > 180) { NVlon = 0; }
@@ -229,7 +241,7 @@ void setup() {
   digitalWrite(DispMoon_CS, 0);
   tft.begin();
   tft.setRotation(0);  // 0 = portrait, 1 = Landscape, 2 = portrait vert flip, 3 = landscape vert flip
-  tft.setTextSize(0);
+  tft.setTextSize(1);
   tft.fillScreen(TFT_BLACK);
   tft.setFreeFont(FONT1);
   tft.setTextColor(TFT_COLOR1);  // adjust color matching the aged sky background
@@ -368,14 +380,36 @@ void displayMoonSunPos() {
   tft.drawCircle(centerX, centerY, 10, TFT_COLOR1);
   updateText("", "E", centerX - 5, centerY + 4);  // old string, new string, x-pos, y-pos
 
-  tft.drawEllipse(centerX, centerY, 100, 50, TFT_COLOR1);  // draw orbit
+  tft.drawEllipse(centerX, centerY, 100, 50, TFT_COLOR1);       // draw orbit
+  tft.fillRect(centerX - 6, centerY - 58, 12, 16, TFT_BLACK);   // (N) Generate spaces in ellipse to draw N/E/S/W
+  tft.fillRect(centerX + 94, centerY - 8, 12, 16, TFT_BLACK);   // (E)
+  tft.fillRect(centerX - 6, centerY + 42, 12, 16, TFT_BLACK);   // (S)
+  tft.fillRect(centerX - 106, centerY - 8, 12, 16, TFT_BLACK);  // (W)
 
-  int MposX = centerX + 90 * cos(degToRad(moonAz + 90));  // calculate moon position on inside of ellipse (add 90 degrees to start at bottom)
-  int MposY = centerY + 40 * sin(degToRad(moonAz + 90));
-  updateText("", "M", MposX - 5, MposY + 5);              // old string, new string, x-pos, y-pos
-  int SposX = centerX + 110 * cos(degToRad(sunAz + 90));  // calculate sun position on outside of ellipse (add 90 degrees to start at bottom)
-  int SposY = centerY + 60 * sin(degToRad(sunAz + 90));
-  updateText("", "S", SposX - 5, SposY + 5);             // old string, new string, x-pos, y-pos
+  int obsOffset = 90;
+  char compass[] = "SWNE";
+  // add 90 degrees to start counting position angle at bottom (north) for observer in northern hemisphere.
+  // Flip moon/sun position to start counting position angle at top (south) for observer in southern hemisphere
+  if (observer_lat < 0) {  // souther hemisphere, flip compass
+    obsOffset = -90;
+    strcpy(compass, "NESW");
+  }
+
+  tft.setCursor(centerX - 5, centerY - 45);  // N or S
+  tft.print(compass[0]);
+  tft.setCursor(centerX + 95, centerY + 4);  // E or W
+  tft.print(compass[1]);
+  tft.setCursor(centerX - 5, centerY + 55);  // S or N
+  tft.print(compass[2]);
+  tft.setCursor(centerX - 105, centerY + 4);  // W or E
+  tft.print(compass[3]);
+
+  int MposX = centerX + 90 * cos(degToRad(moonAz + obsOffset));  // calculate moon position on inside of ellipse
+  int MposY = centerY + 40 * sin(degToRad(moonAz + obsOffset));
+  updateText("", "M", MposX - 4, MposY + 6);                     // old string, new string, x-pos, y-pos
+  int SposX = centerX + 110 * cos(degToRad(sunAz + obsOffset));  // calculate sun position on outside of ellipse
+  int SposY = centerY + 60 * sin(degToRad(sunAz + obsOffset));
+  updateText("", "S", SposX - 4, SposY + 6);             // old string, new string, x-pos, y-pos
   tft.drawLine(MposX, MposY, SposX, SposY, TFT_COLOR1);  // draw line between sun and moon
   digitalWrite(DispText_CS, 1);
   digitalWrite(DispMoon_CS, 1);
@@ -826,7 +860,7 @@ void updateTxtDisplay() {  // Text portion update
     }
 
     if (NextMoonUTCO != NextMoonUTC[0]) {       // erase all next moon dates if there was a change in the first UTC timestamp
-      tft.fillRect(0, 15, 240, 85, TFT_BLACK);  // coordinates x,y,w,h - color fill of rectangle
+      tft.fillRect(0, 20, 240, 85, TFT_BLACK);  // coordinates x,y,w,h - color fill of rectangle
       updateText("", "Next Moon: ", 5, 35);     // rewrite header of table
       NextMoonUTCO = NextMoonUTC[0];            // remember first row timestamp
     }
@@ -917,7 +951,9 @@ void GetTimeStr() {            // get local time based on timezone, STD/DST
 void write_NVRAM(void) {
   NVlat = observer_lat;
   NVlon = observer_lon;
-  uint8_t writeData[9] = { 16, 16, TZselect, NVlat, NVlon, 0, 0, 0, 0 };
+  uint8_t msb = (NVlon >> 8) & 0xFF;  // Longitude MSB is the upper 8 bits
+  uint8_t lsb = NVlon & 0xFF;         // Longitude LSB is the lower 8 bits
+  uint8_t writeData[9] = { 16, 16, TZselect, NVlat, msb, lsb, 0, 0, 0 };
   RTC.writenvram(0, writeData, 9);
 }
 
@@ -935,7 +971,7 @@ void countUp() {  // this void runs on turn right
       UTCsec += 86400;  // add one day
       break;
     case 13:
-      temp = year(UTCsec) + 1;
+      temp = year(UTCsec) + 1;  // add one year
       if (temp > 2099) { temp = 2099; }
       UTCsec = DateTime(temp, month(UTCsec), day(UTCsec), hour(UTCsec), minute(UTCsec), second(UTCsec)).unixtime();
       break;
@@ -958,7 +994,7 @@ void countUp() {  // this void runs on turn right
       break;
     case 18:
       observer_lon += 1;  // add half a degree lon
-      if (observer_lat > 180) { observer_lat -= 360; }
+      if (observer_lon > 180) { observer_lon -= 360; }
       break;
     default:
       return;  // return if not in one of the setting modes avoiding change in RTC
@@ -980,7 +1016,7 @@ void countDn() {  // this void runs on turn left
       UTCsec -= 86400;  // back one day
       break;
     case 13:
-      temp = year(UTCsec) - 1;
+      temp = year(UTCsec) - 1;  // back one year
       if (temp < 2000) { temp = 2000; }
       UTCsec = DateTime(temp, month(UTCsec), day(UTCsec), hour(UTCsec), minute(UTCsec), second(UTCsec)).unixtime();
       break;
@@ -1003,7 +1039,7 @@ void countDn() {  // this void runs on turn left
       break;
     case 18:
       observer_lon -= 1;                                 // minus half a degree lon
-      if (observer_lat < -180) { observer_lat += 360; }  // wrap around
+      if (observer_lon < -180) { observer_lon += 360; }  // wrap around
       break;
     default:
       return;  // return if not in one of the setting modes avoiding change in RTC
